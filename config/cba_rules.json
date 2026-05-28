@@ -1,0 +1,8 @@
+{
+  "salary_cap": 140500000,
+  "luxury_tax_threshold": 170814000,
+  "first_apron": 178132000,
+  "second_apron": 188931000,
+  "mid_level_exception_non_taxpayer": 12822000,
+  "mid_level_exception_taxpayer": 5168000
+}

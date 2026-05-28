@@ -1,0 +1,12 @@
+llm:
+  main_provider: "openai"
+  model_name: "gpt-4o"
+  temperature: 0.2
+
+nba_api:
+  timeout_seconds: 30
+  retry_count: 3
+
+paths:
+  processed_data_dir: "data/processed"
+  vector_store_dir: "data/vector_store"
