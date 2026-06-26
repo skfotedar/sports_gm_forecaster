@@ -3,6 +3,7 @@ import os
 import json
 from pathlib import Path
 from typing import TypedDict, List, Annotated, Optional
+import random
 
 # 2. Third-Party Packages
 from dotenv import load_dotenv
@@ -53,14 +54,21 @@ print(retriever)
 # =====================================================================
 class AgentState(TypedDict):
     messages: List[BaseMessage]
+    target_team: str                # Added
+    team_name: str                  # Added
+    team_payroll: int               # Added
+    team_metrics: dict              # Added
     proposed_trades: List[TradeProposal]
     proposed_trade: Optional[TradeProposal]
     proposed_salary: Optional[int]
     current_depth: int
     cba_context: str
+    cba_hard_cap: int               # Added to track parsed RAG limits
+    cba_first_apron: int            # Added to track parsed RAG limits
     is_compliant: bool
     compliance_violations: List[str]
     loop_count: int
+    parse_error: bool               # Added for the routing conditional edge
 
 class CBAMacros(BaseModel):
     hard_cap: int = Field(description="The maximum salary cap allowed in dollars as an integer. Example: 260000000")
@@ -131,18 +139,26 @@ def gm_recommender(state: AgentState):
     context = state.get("cba_context", "No context retrieved yet.")
     current_depth = state.get("current_depth", 0)
 
-    # THE FIX: Bind the schema to the LLM
+    # Extract live data layer fields injected by team_profile_node
+    team_name = state.get("team_name", "Target Team")
+    team_payroll = state.get("team_payroll", 172000000)
+    team_metrics = state.get("team_metrics", {})
+
+    # Use the message history to gracefully peek at what the data layer found
+    roster_hint = f"Current Payroll: ${team_payroll:,}. Strategy Baseline: Off-Rating {team_metrics.get('off_rating', 'N/A')}"
+
     structured_llm = llm.with_structured_output(TradeScenarios)
 
-    # Notice how much cleaner the prompt is. We don't have to beg for formatting.
+    # Enhanced Contextual Prompt
     system_prompt = (
-        f"You are an expert Sports GM Assistant exploring strategic scenarios.\n"
-        f"Analyze this CBA context: {context}\n"
-        f"Generate exactly 3 distinct, creative trade proposals for us to evaluate in parallel."
+        f"You are an expert Sports GM Assistant engineering roster modifications for the {team_name}.\n"
+        f"Team Financial State: {roster_hint}\n"
+        f"Analyze this CBA constraint context: {context}\n"
+        f"Generate exactly 3 distinct, highly creative trade proposals designed to improve this roster "
+        f"while remaining within the strict salary matching parameters."
     )
 
     try:
-        # The LLM natively returns a fully validated TradeScenarios Pydantic object
         response_payload = structured_llm.invoke([HumanMessage(content=system_prompt)] + messages)
 
         proposed_trades = []
@@ -240,16 +256,15 @@ def bfs_evaluator(state: AgentState):
     dynamic_cap = state.get("cba_hard_cap", 260000000)
     dynamic_apron = state.get("cba_first_apron", 280000000)
 
-    # THE FIX: Pull the dynamically extracted payroll from the data layer
-    current_payroll = state.get("team_payroll", 200000000)  # 200M Failsafe
+    # Grabs the $172,000,000 payroll pulled live via NBAMVPExtractor!
+    current_payroll = state.get("team_payroll", 172000000)
 
     if not proposed_trades:
         error_msg = AIMessage(content="SYSTEM ERROR: No trades passed to evaluator.")
         return {"is_compliant": False, "messages": [error_msg]}
 
-    # Inject the dynamic limits into the physics engine
     validator = CBAValidator(hard_cap=dynamic_cap, first_apron=dynamic_apron)
-    current_payroll = 200000000  # Mock current payroll
+    # REMOVED THE MOCK OVERRIDE LINE: current_payroll = 200000000
 
     surviving_trades = []
     evaluation_logs = []
@@ -281,48 +296,56 @@ def executive_gm_agent(state: AgentState):
     surviving_trades = state.get("proposed_trades", [])
     messages = state.get("messages", [])
 
-    # Failsafe: If no trades survived the BFS, the executive has nothing to review
+    # NEW: Pull team metrics to inform strategic decision-making
+    team_name = state.get("team_name", "Target Team")
+    team_metrics = state.get("team_metrics", {})
+    off_rating = team_metrics.get("off_rating", 110.0)
+
+    # Failsafe
     if not surviving_trades:
         return {"messages": [
             AIMessage(content="Executive GM: All parallel trade paths failed compliance. No viable moves available.")]}
 
-    # Format the surviving options for the LLM to review with explicit zero-based indexing
+    # Format options with deeply contextual team impact
     options_text = "SURVIVING COMPLIANT TRADES FOR REVIEW:\n"
     for idx, trade in enumerate(surviving_trades):
+        incoming_names = [p.get("name", "Unknown Player") for p in trade.players_incoming]
+        outgoing_names = [p.get("name", "Unknown Player") for p in trade.players_outgoing]
         incoming_salary = sum(p.get("current_salary", 0) for p in trade.players_incoming)
-        options_text += f"Index [{idx}]: {len(trade.players_incoming)} incoming players, Total Salary: ${incoming_salary:,}\n"
 
+        options_text += (
+            f"Index [{idx}]:\n"
+            f"  - Outgoing: {', '.join(outgoing_names)}\n"
+            f"  - Incoming: {', '.join(incoming_names)}\n"
+            f"  - Financial Footprint: Net Incoming Salary ${incoming_salary:,}\n"
+        )
+
+    # Contextualized Executive Prompt
     system_prompt = (
-        f"You are the franchise's Executive General Manager.\n"
-        f"Your front office has validated the following trades as legally compliant under the CBA:\n{options_text}\n"
-        f"Select the absolute best strategic path. You must return the exact index number of your choice and a brief justification."
+        f"You are the franchise's Executive General Manager for the {team_name}.\n"
+        f"Your current baseline offensive efficiency rating is {off_rating}. You want to maximize value.\n"
+        f"Review these legally validated, CBA-compliant trade options:\n\n{options_text}\n"
+        f"Select the absolute best strategic path that balances financial compliance with roster improvement. "
+        f"You must return the exact index number of your choice and a brief, 2-sentence executive summary justifying the strategic choice."
     )
 
-    # THE FIX: Bind the new decision schema to the LLM
     structured_llm = llm.with_structured_output(ExecutiveDecision)
 
     try:
-        # The LLM natively returns the structured decision (selected_index and justification)
         decision = structured_llm.invoke([HumanMessage(content=system_prompt)] + messages)
-
-        # Boundary Check: Prevent an IndexError if the LLM hallucinates a number out of bounds
         safe_index = decision.selected_index if 0 <= decision.selected_index < len(surviving_trades) else 0
-
-        # Programmatically grab the exact trade the LLM selected
         winning_trade = surviving_trades[safe_index]
 
-        # Format the final output for the state history
         final_message = AIMessage(
             content=f"Executive Decision (Selected Index {safe_index}): {decision.justification}"
         )
 
         return {
             "messages": [final_message],
-            "proposed_trades": [winning_trade]  # The state now strictly holds only the approved payload
+            "proposed_trades": [winning_trade]
         }
 
     except Exception as e:
-        # Fallback if the structured output fails entirely
         error_msg = f"SYSTEM ERROR: Executive GM failed to return a valid schema. Defaulting to first safe trade. Error: {str(e)}"
         return {
             "messages": [AIMessage(content=error_msg)],
@@ -417,12 +440,32 @@ app = workflow.compile()
 
 # --- EXECUTION SCRIPT ---
 if __name__ == "__main__":
-    initial_input = {"messages": [HumanMessage(content="We need to sign a superstar center for $275,000,000.")]}
+    # 1. List of exciting target teams to explore dynamically
+    nba_teams = ["NYK", "BOS", "LAL", "GSW", "MIA", "PHX", "DEN", "MIL"]
+    selected_team = random.choice(nba_teams)
+
+    # 2. List of distinct target scenarios to vary the LLM's prompt context
+    scenarios = [
+        f"We need to clear cap space and find a trading partner for {selected_team}.",
+        f"The {selected_team} front office wants to acquire an elite floor-spacing wing player.",
+        f"Build a multi-player depth trade structure for {selected_team} focusing on frontcourt physical upgrades.",
+        f"Construct a block-buster salary-matching framework to bring an all-star to {selected_team}."
+    ]
+    selected_prompt = random.choice(scenarios)
+
+    # 3. Initialize the state with the dynamically randomized target team and prompt
+    initial_input = {
+        "target_team": selected_team,  # Triggers your NBAMVPExtractor for this specific team!
+        "messages": [HumanMessage(content=selected_prompt)]
+    }
+
+    print(f"\n🎲 Launching Random Simulation Tier...")
+    print(f"🎯 Target Team: {selected_team}")
+    print(f"📝 Prompt Context: {selected_prompt}\n")
+
+    # Invoke the LangGraph State Machine
     final_state = app.invoke(initial_input)
 
     print("\n--- FINAL INTEGRATION: EXECUTION COMPLETE ---")
-    # This will print the LLM's final 2-sentence executive summary
     print(f"Executive Decision: {final_state['messages'][-1].content}")
-
-    # Confirms that we pruned the array down to exactly 1 winning trade path
     print(f"\nLocked State Trade Count: {len(final_state.get('proposed_trades', []))}")
